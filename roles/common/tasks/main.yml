@@ -1,0 +1,157 @@
+---
+- name: Disable swap (runtime)
+  command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+
+- name: Remove swap line from /etc/fstab
+  replace:
+    path: /etc/fstab
+    regexp: '^\s*([^#].*swap.*)$'
+    replace: ''
+  ignore_errors: yes
+
+- name: Load br_netfilter module
+  ansible.builtin.modprobe:
+    name: br_netfilter
+    state: present
+
+- name: Ensure br_netfilter is loaded on boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: "br_netfilter\n"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Ensure sysctl for bridge netfilter 
+  sysctl:
+    name: net.bridge.bridge-nf-call-iptables
+    value: 1
+    state: present
+    reload: yes
+
+- name: Ensure sysctl for bridge netfilter (IPv6)
+  ansible.posix.sysctl:
+    name: net.bridge.bridge-nf-call-ip6tables
+    value: 1
+    state: present
+    reload: yes
+
+- name: Ensure ip_forward enabled
+  sysctl:
+    name: net.ipv4.ip_forward
+    value: 1
+    state: present
+    reload: yes
+
+- name: Ensure control plane endpoint is in /etc/hosts
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ k8s_control_plane_ip }} {{ k8s_control_plane_endpoint }}"
+    state: present
+
+# Download the public signing key for the Kubernetes package repositories.
+- name: Ensure apt keyrings directory exists
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+# curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key
+- name: Download Kubernetes GPG key
+  get_url:
+    url: "{{ k8s_repo_url }}/Release.key"
+    dest: /tmp/k8s-release.key
+    mode: '0644'
+
+# sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+- name: Convert GPG key to keyring
+  command: "gpg --dearmor -o {{ k8s_keyring_path }} /tmp/k8s-release.key"
+  args:
+    creates: "{{ k8s_keyring_path }}"
+
+# echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | \
+# sudo tee /etc/apt/sources.list.d/kubernetes.list
+- name: Add Kubernetes apt repository
+  apt_repository:
+    repo: "deb [signed-by={{ k8s_keyring_path }}] {{ k8s_repo_url }} /"
+    state: present
+
+- name: Update apt cache  # optymalizacja apt - jeżeli lista pakietów w cache jest mlodsza niz 36000s (1h) nie rob nic
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Ensure required packages installed
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+
+- name: Install containerd
+  apt:
+    name:
+      - containerd
+    state: present
+    update_cache: yes
+
+- name: Ensure containerd config directory exists
+  file:
+    path: /etc/containerd
+    state: directory
+    mode: 0755
+
+- name: Configure crictl to use containerd
+  ansible.builtin.copy:
+    dest: /etc/crictl.yaml
+    content: |
+      runtime-endpoint: unix:///run/containerd/containerd.sock
+      image-endpoint: unix:///run/containerd/containerd.sock
+      timeout: 10
+      debug: false
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Deploy containerd config
+  template:
+    src: containerd-config.toml.j2
+    dest: /etc/containerd/config.toml
+    mode: '0644'
+  notify: Restart containerd
+
+- name: Install kubeadm, kubelet, kubectl
+  apt:
+    name:
+      - kubelet={{ kube_version }}
+      - kubeadm={{ kube_version }}
+      - kubectl={{ kube_version }}
+    state: present
+    update_cache: yes
+
+- name: Hold kube packages
+  apt:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+    state: present
+    force: no
+    dpkg_options: "hold"
+
+- name: Enable and start containerd
+  systemd:
+    name: containerd
+    enabled: yes
+    state: started
+
+- name: Make sure kubelet is enabled
+  systemd:
+    name: kubelet
+    enabled: yes
+    state: started
+

@@ -1,0 +1,10 @@
+---
+- hosts: k8s_cluster
+  become: yes
+  roles:
+    - common
+
+- hosts: masters
+  become: yes
+  roles:
+    - kube_master

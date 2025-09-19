@@ -1,0 +1,10 @@
+kind: ClusterConfiguration
+apiVersion: kubeadm.k8s.io/v1beta4
+kubernetesVersion: stable
+controlPlaneEndpoint: "{{ k8s_control_plane_endpoint }}:{{ k8s_control_plane_port }}"
+networking:
+  podSubnet: "{{ pod_network_cidr }}"
+---
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+cgroupDriver: systemd
