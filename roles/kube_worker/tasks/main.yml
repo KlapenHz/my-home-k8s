@@ -1,0 +1,35 @@
+---
+- name: Wait until master join command available
+  wait_for:
+    path: "/home/{{ rpi_user_name }}/join.sh"
+    # host: "{{ k8s_control_plane_ip  }}"
+    state: present
+    timeout: 300
+  delegate_to: "{{ k8s_control_plane_ip  }}"
+  run_once: true
+  # ignore_errors: true
+  register: wait_for_join
+
+- name: Fail if join.sh not found on master
+  fail:
+    msg: "join.sh not found on master node within timeout!"
+  when: not wait_for_join.found
+  run_once: true
+
+- name: Fetch join command from master
+  slurp:
+    src: "/home/{{ rpi_user_name }}/join.sh"
+  register: join_sh
+  delegate_to: "{{ k8s_control_plane_ip  }}"
+  run_once: true
+
+- name: Set join command fact
+  set_fact:
+    kube_join_cmd: "{{ (join_sh.content | b64decode).splitlines()[-1] }}"
+  run_once: true
+
+- name: Join the node to the cluster
+  command: "{{ kube_join_cmd }} --ignore-preflight-errors=Swap"
+  args:
+    creates: /etc/kubernetes/kubelet.conf
+

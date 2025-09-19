@@ -1,0 +1,58 @@
+---
+- name: Ensure /etc/kubernetes/admin.conf does not exist before init
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: admin_conf_stat
+
+- name: Create kubeadm-config file
+  template:
+    src: kubeadm-config.yaml.j2
+    dest: /tmp/kubeadm-config.yaml
+  when: not admin_conf_stat.stat.exists
+
+- name: Initialize Kubernetes Master
+  command: >
+    kubeadm init --config /tmp/kubeadm-config.yaml --upload-certs
+  args:
+    creates: /etc/kubernetes/admin.conf
+  register: kubeadm_init
+  changed_when: "'initialized' in kubeadm_init.stdout or kubeadm_init.rc == 0"
+
+- name: Create .kube directory for {{ rpi_user_name }} user
+  file:
+    path: "/home/{{ rpi_user_name }}/.kube"
+    state: directory
+    owner: "{{ rpi_user_name }}"
+    group: "{{ rpi_user_name }}"
+    mode: 0755
+
+- name: "Copy admin.conf to {{ rpi_user_name }} user kubeconfig"
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "/home/{{ rpi_user_name }}/.kube/config"
+    owner: "{{ rpi_user_name }}"
+    group: "{{ rpi_user_name }}"
+    mode: 0644
+    remote_src: true
+  become: true
+
+- name: Get kubeadm join command (worker)
+  shell: kubeadm token create --print-join-command --ttl {{ kubeadm_token_ttl }}
+  register: join_command
+  changed_when: false
+  run_once: true
+
+- name: Set fact with join command
+  set_fact:
+    kube_join_cmd: "{{ join_command.stdout }}"
+  run_once: true
+
+- name: "Save join command to /home/{{ rpi_user_name }}/join.sh for later"
+  copy:
+    content: |
+      #!/bin/bash
+      {{ kube_join_cmd }}
+    dest: "/home/{{ rpi_user_name }}/join.sh"
+    owner: "{{ rpi_user_name }}"
+    group: "{{ rpi_user_name }}"
+    mode: '0755'
